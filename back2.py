@@ -3,180 +3,100 @@ from flask import Flask, render_template, request, jsonify
 import yfinance as yf
 import pandas as pd
 import numpy as np
-np.float_ = np.float64
 from prophet import Prophet
-from pymongo import MongoClient
-import json
-import plotly
+from datetime import datetime, timedelta
 import plotly.graph_objs as go
-from dotenv import load_dotenv
-from datetime import datetime
-
-# Load environment variables
-load_dotenv()
+import plotly.offline as pyo
+import logging
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# MongoDB setup
-client = MongoClient(os.getenv('MONGO_URI', 'mongodb://localhost:27017'))
-db = client.stock_app
-stock_data = db.stock_data
+def fetch_stock_data(symbol, years=1):
+    try:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=years*365)
+        
+        stock = yf.Ticker(symbol)
+        df = stock.history(start=start_date, end=end_date)
+        
+        if df.empty:
+            return None, "No data available for this stock"
+        
+        return df, None
+    except Exception as e:
+        logging.error(f"Stock data fetch error: {e}")
+        return None, str(e)
 
-def get_stock_data(symbol, start_date, end_date):
-    existing_data = stock_data.find_one({
-        'symbol': symbol,
-        'start_date': start_date,
-        'end_date': end_date
-    })
+def generate_stock_chart(df):
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index,
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['Close']
+    )])
+    fig.update_layout(title=f'Stock Price', xaxis_rangeslider_visible=False)
+    return pyo.plot(fig, output_type='div')
 
-    if existing_data:
-        try:
-            df = pd.DataFrame(json.loads(existing_data['data']))
-            df.index = pd.to_datetime(df.index, format='%Y-%m-%d')
-            return df
-        except (ValueError, KeyError) as e:
-            print(f"Error parsing stored data: {e}")
-            return fetch_and_store_data(symbol, start_date, end_date)
-    else:
-        return fetch_and_store_data(symbol, start_date, end_date)
-
-def fetch_and_store_data(symbol, start_date, end_date):
-    data = yf.download(symbol, start=start_date, end=end_date)
-    if not data.empty:
-        stock_data.insert_one({
-            'symbol': symbol,
-            'start_date': start_date,
-            'end_date': end_date,
-            'data': data.reset_index().to_json(date_format='iso')
-        })
-    return data
-
-def calculate_indicators(data):
-    data['EMA_50'] = data['Close'].ewm(span=50, adjust=False).mean()
-    data['EMA_12'] = data['Close'].ewm(span=12, adjust=False).mean()
-    data['EMA_26'] = data['Close'].ewm(span=26, adjust=False).mean()
-    data['MACD'] = data['EMA_12'] - data['EMA_26']
-    data['Signal_Line'] = data['MACD'].ewm(span=9, adjust=False).mean()
-    delta = data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    data['RSI'] = 100 - (100 / (1 + rs))
-    return data
-
-def predict_future_price(data, days_to_predict=365):
-    df = data.reset_index()[['Date', 'Close']]
-    df.columns = ['ds', 'y']
-    model = Prophet(daily_seasonality=True)
-    model.fit(df)
-    future = model.make_future_dataframe(periods=days_to_predict)
-    forecast = model.predict(future)
-    return forecast
-
-def create_stock_plot(data):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=data.index,
-                open=data['Open'],
-                high=data['High'],
-                low=data['Low'],
-                close=data['Close'],
-                name='Candlestick'))
-    fig.add_trace(go.Scatter(x=data.index, y=data['EMA_50'], name='EMA 50'))
-    fig.update_layout(
-        title='Stock Price Chart',
-        xaxis_title='Date',
-        yaxis_title='Price (USD)',
-        xaxis_rangeslider_visible=False
-    )
-    return plotly.io.to_json(fig)
-
-def create_indicator_plots(data):
-    macd_fig = go.Figure()
-    macd_fig.add_trace(go.Scatter(x=data.index, y=data['MACD'], name='MACD'))
-    macd_fig.add_trace(go.Scatter(x=data.index, y=data['Signal_Line'], name='Signal Line'))
-    macd_fig.update_layout(title='MACD', xaxis_title='Date', yaxis_title='Value')
-    
-    rsi_fig = go.Figure()
-    rsi_fig.add_trace(go.Scatter(x=data.index, y=data['RSI'], name='RSI'))
-    rsi_fig.add_hline(y=70, line_dash="dash", line_color="red")
-    rsi_fig.add_hline(y=30, line_dash="dash", line_color="green")
-    rsi_fig.update_layout(title='RSI', xaxis_title='Date', yaxis_title='Value')
-    
-    return plotly.io.to_json(macd_fig), plotly.io.to_json(rsi_fig)
-
-def create_prediction_plot(data, forecast):
-    fig = go.Figure()
-    
-    # Historical data
-    fig.add_trace(go.Scatter(x=data.index, y=data['Close'],
-                             mode='lines',
-                             name='Historical Close Price'))
-    
-    # Predicted data
-    fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'],
-                             mode='lines',
-                             name='Predicted Close Price'))
-    
-    # Add confidence interval
-    fig.add_trace(go.Scatter(
-        x=forecast['ds'].tolist() + forecast['ds'].tolist()[::-1],
-        y=forecast['yhat_upper'].tolist() + forecast['yhat_lower'].tolist()[::-1],
-        fill='toself',
-        fillcolor='rgba(0,100,80,0.2)',
-        line=dict(color='rgba(255,255,255,0)'),
-        hoverinfo="skip",
-        showlegend=False
-    ))
-    
-    fig.update_layout(
-        title='Stock Price Prediction',
-        xaxis_title='Date',
-        yaxis_title='Price (USD)',
-        legend_title="Data Series",
-        hovermode="x unified"
-    )
-    
-    return plotly.io.to_json(fig)
+def predict_stock_price(df, days_to_predict=30):
+    try:
+        # Remove timezone information
+        df.index = df.index.tz_localize(None)
+        
+        # Prepare data for Prophet
+        prophet_df = df[['Close']].reset_index()
+        prophet_df.columns = ['ds', 'y']
+        
+        # Ensure data is sufficient and valid
+        if len(prophet_df) < 30:
+            return None, "Insufficient historical data for prediction"
+        
+        if prophet_df['y'].isnull().any():
+            return None, "Contains invalid price data"
+        
+        model = Prophet(
+            daily_seasonality=False,
+            weekly_seasonality=True,
+            yearly_seasonality=True
+        )
+        model.fit(prophet_df)
+        
+        future = model.make_future_dataframe(periods=days_to_predict)
+        forecast = model.predict(future)
+        
+        return forecast, None
+    except Exception as e:
+        logging.error(f"Prediction detailed error: {e}")
+        return None, f"Prediction failed: {str(e)}"
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        symbol = request.form['stock']
-        years = int(request.form['years'])
-        days_to_predict = int(request.form.get('days_to_predict', 365))
-
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - pd.DateOffset(years=years)).strftime('%Y-%m-%d')
-
-        try:
-            data = get_stock_data(symbol, start_date, end_date)
-            
-            if data.empty:
-                return render_template('error.html', message=f"No data available for {symbol} in the specified date range.")
-
-            data = calculate_indicators(data)
-            stock_plot = create_stock_plot(data)
-            macd_plot, rsi_plot = create_indicator_plots(data)
-            
-            forecast = predict_future_price(data, days_to_predict)
-            prediction_plot = create_prediction_plot(data, forecast)
-            
-            final_predicted_price = f"{forecast['yhat'].iloc[-1]:.2f}"
-            prediction_date = forecast['ds'].iloc[-1].strftime('%Y-%m-%d')
-
-            return render_template('results.html', 
-                                   stock=symbol, 
-                                   years=years,
-                                   stock_plot=stock_plot,
-                                   macd_plot=macd_plot,
-                                   rsi_plot=rsi_plot,
-                                   prediction_plot=prediction_plot,
-                                   final_predicted_price=final_predicted_price,
-                                   prediction_date=prediction_date)
-
-        except Exception as e:
-            return render_template('error.html', message=f"An error occurred: {str(e)}")
-
+        symbol = request.form.get('stock', '').upper()
+        years = int(request.form.get('years', 1))
+        days_to_predict = int(request.form.get('days_to_predict', 30))
+        
+        df, error = fetch_stock_data(symbol, years)
+        
+        if error:
+            return render_template('error.html', message=error)
+        
+        stock_chart = generate_stock_chart(df)
+        forecast, prediction_error = predict_stock_price(df, days_to_predict)
+        
+        if prediction_error:
+            return render_template('error.html', message=prediction_error)
+        
+        predicted_price = forecast['yhat'].iloc[-1]
+        prediction_date = forecast['ds'].iloc[-1]
+        
+        return render_template('results.html', 
+                               stock=symbol, 
+                               stock_chart=stock_chart,
+                               predicted_price=f"{predicted_price:.2f}",
+                               prediction_date=prediction_date.strftime('%Y-%m-%d'))
+    
     return render_template('index.html')
 
 if __name__ == '__main__':

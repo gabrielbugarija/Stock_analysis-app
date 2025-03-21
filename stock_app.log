@@ -1,0 +1,5 @@
+2025-01-23 11:24:14,002 - WARNING -  * Debugger is active!
+2025-01-23 11:24:14,005 - INFO -  * Debugger PIN: 112-157-685
+2025-01-23 11:25:32,394 - INFO - 127.0.0.1 - - [23/Jan/2025 11:25:32] "GET / HTTP/1.1" 200 -
+2025-01-23 11:25:36,268 - INFO - 127.0.0.1 - - [23/Jan/2025 11:25:36] "GET /?stock=NVDA&years=1&days_to_predict=30&features=moving_averages&features=volume&features=technical HTTP/1.1" 200 -
+2025-01-23 11:25:56,350 - INFO -  * Detected change in 'c:\\Users\\Gabri\\Amiba\\back2.py', reloading
